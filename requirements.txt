@@ -1,0 +1,7 @@
+Flask==3.0.3
+psycopg2-binary==2.9.10
+PyJWT==2.9.0
+bcrypt==4.2.0
+pyotp==2.9.0
+python-dotenv==1.0.1
+waitress==3.0.0

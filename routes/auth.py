@@ -1,0 +1,173 @@
+from flask import Blueprint, request
+from db import get_connection
+from utils.response import success, error
+from utils.auth import hash_password,check_password,create_access_token,require_auth
+from utils.otp import generate_otp, hash_otp, otp_expiry, check_otp
+import datetime
+from flask import g
+
+
+auth_bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
+
+
+@auth_bp.route("/register", methods=["POST"])
+def register():
+    body = request.get_json()
+
+    full_name = body.get("full_name")
+    email = body.get("email")
+    password = body.get("password")
+
+    if not full_name or not email or not password:
+        return error("VALIDATION_ERROR", "full_name, email, and password are required")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT id FROM users WHERE email = %s", (email,))
+    existing_user = cur.fetchone()
+
+    if existing_user:
+        cur.close()
+        conn.close()
+        return error("CONFLICT", "An account with this email already exists", 409)
+
+    password_hash = hash_password(password)
+
+    cur.execute(
+        "INSERT INTO users (full_name, email, password_hash) VALUES (%s, %s, %s) RETURNING id, email",
+        (full_name, email, password_hash)
+    )
+    new_user = cur.fetchone()
+
+    otp_code = generate_otp()
+    otp_hash = hash_otp(otp_code)
+
+    cur.execute(
+        "INSERT INTO otp_codes (user_id, code_hash, purpose, expires_at) VALUES (%s, %s, %s, %s)",
+        (new_user["id"], otp_hash, "verify_email", otp_expiry())
+    )
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    print(f"[DEV ONLY] OTP for {email}: {otp_code}")
+
+    return success(new_user, message="OTP sent to email", status=201)
+
+
+
+
+@auth_bp.route("/verify-otp", methods=["POST"])
+def verify_otp_route():
+    body = request.get_json()
+
+    email = body.get("email")
+    otp = body.get("otp")
+
+    if not email or not otp:
+        return error("VALIDATION_ERROR", "email and otp are required")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+
+    if not user:
+        cur.close()
+        conn.close()
+        return error("NOT_FOUND", "No account with this email", 404)
+
+    cur.execute(
+        """
+        SELECT * FROM otp_codes
+        WHERE user_id = %s AND purpose = 'verify_email' AND used = FALSE
+        ORDER BY created_at DESC LIMIT 1
+        """,
+        (user["id"],)
+    )
+    otp_row = cur.fetchone()
+
+    if not otp_row:
+        cur.close()
+        conn.close()
+        return error("INVALID_OTP", "No pending verification code for this account")
+
+    if datetime.datetime.utcnow() > otp_row["expires_at"]:
+        cur.close()
+        conn.close()
+        return error("OTP_EXPIRED", "This code has expired, request a new one")
+
+    if not check_otp(otp, otp_row["code_hash"]):
+        cur.close()
+        conn.close()
+        return error("INVALID_OTP", "Incorrect code")
+
+    cur.execute("UPDATE otp_codes SET used = TRUE WHERE id = %s", (otp_row["id"],))
+    cur.execute("UPDATE users SET is_verified = TRUE WHERE id = %s", (user["id"],))
+    conn.commit()
+
+    cur.close()
+    conn.close()
+
+    return success(message="Email verified successfully")
+
+
+
+
+
+@auth_bp.route("/login", methods=["POST"])
+def login():
+    body = request.get_json()
+
+    email = body.get("email")
+    password = body.get("password")
+
+    if not email or not password:
+        return error("VALIDATION_ERROR", "email and password are required")
+
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute("SELECT * FROM users WHERE email = %s", (email,))
+    user = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    if not user or not check_password(password, user["password_hash"]):
+        return error("UNAUTHORIZED", "Invalid email or password", 401)
+
+    access_token = create_access_token(user["id"], user["role"])
+
+    return success({
+        "access_token": access_token,
+        "user": {
+            "id": user["id"],
+            "full_name": user["full_name"],
+            "email": user["email"],
+            "role": user["role"]
+        }
+    }, message="Login successful")
+
+
+
+
+@auth_bp.route("/me", methods=["GET"])
+@require_auth
+def me():
+    conn = get_connection()
+    cur = conn.cursor()
+
+    cur.execute(
+        "SELECT id, full_name, email, role, created_at FROM users WHERE id = %s",
+        (g.current_user["user_id"],)
+    )
+    user = cur.fetchone()
+
+    cur.close()
+    conn.close()
+
+    return success(user)
