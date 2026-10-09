@@ -5,6 +5,7 @@ from utils.auth import hash_password,check_password,create_access_token,require_
 from utils.otp import generate_otp, hash_otp, otp_expiry, check_otp
 import datetime
 from flask import g
+from utils.email import send_otp_email
 
 
 auth_bp = Blueprint("auth", __name__, url_prefix="/api/v1/auth")
@@ -52,8 +53,7 @@ def register():
     cur.close()
     conn.close()
 
-    print(f"[DEV ONLY] OTP for {email}: {otp_code}")
-
+    send_otp_email(email, otp_code, purpose="verify_email")
     return success(new_user, message="OTP sent to email", status=201)
 
 
@@ -228,8 +228,7 @@ def forgot_password():
         )
         conn.commit()
 
-        print(f"[DEV ONLY] Password reset OTP for {email}: {otp_code}")
-
+        send_otp_email(email, otp_code, purpose="reset_password")
     cur.close()
     conn.close()
 
@@ -315,9 +314,7 @@ def resend_otp():
             (user["id"], otp_hash, "verify_email", otp_expiry())
         )
         conn.commit()
-
-        print(f"[DEV ONLY] Resent verify_email OTP for {email}: {otp_code}")
-
+        send_otp_email(email, otp_code, purpose="verify_email")
     cur.close()
     conn.close()
 
